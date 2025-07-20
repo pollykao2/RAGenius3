@@ -1,7 +1,12 @@
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+
+os.environ.pop("OPENAI_API_KEY", None)
+
+# 強制讀取正確的 .env 檔案
+load_dotenv(dotenv_path="C:/Users/user/Desktop/RAGenius3/.env")
+
 
 import time 
 import torch
@@ -19,6 +24,9 @@ from rank_bm25 import BM25Okapi
 import string
 from nltk.tokenize import TreebankWordTokenizer
 import ta  
+
+
+
 
 # ------------------------
 #  extract_news_content
@@ -38,6 +46,7 @@ def extract_news_content(url):
 # 初始化 tokenizer
 tokenizer = TreebankWordTokenizer()
 
+
 # ------------------------
 # 初始化 Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
@@ -47,6 +56,13 @@ index = pc.Index("news-index")
 # 初始化 BERT 向量化模型
 model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
 model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
+
+# ------------------------
+# Hugging Face 情緒分析
+sentiment_pipeline = pipeline(
+    "sentiment-analysis",
+    model="distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+)
 
 # ------------------------
 # Google News RSS (搜尋鴻海)
@@ -75,6 +91,7 @@ for i, entry in enumerate(feed.entries[:10]):
 bm25 = BM25Okapi(tokenized_corpus)
 print(f"[計時] Google News & BM25 準備耗時: {time.perf_counter() - start_time:.2f} 秒") 
 
+
 # ------------------------
 # 把新聞轉向量並 upsert 到 Pinecone，多新聞內文爬取
 start_time = time.perf_counter()
@@ -82,13 +99,26 @@ for i, entry in enumerate(feed.entries[:10]):
     content = extract_news_content(entry.link)
     if not content:
         content = ""
-    full_text = entry.title + " " + content[:1000]  # 最多取 1000 字
-    vector = model.encode(full_text).tolist()
-    index.upsert([{
-        "id": f"news-{i}",
-        "values": vector,
-        "metadata": {"text": full_text, "url": entry.link}
-    }])
+        full_text = entry.title + " " + content[:1000]
+        vector = model.encode(full_text).tolist()
+
+        # 執行情緒分析（用 full_text 而不是 title）
+        sentiment_result = sentiment_pipeline(full_text)[0]
+        sentiment_label = sentiment_result['label']      # POSITIVE or NEGATIVE
+        sentiment_score = round(sentiment_result['score'], 3)
+
+        # 上傳到 Pinecone，加入情緒標籤
+        index.upsert([{
+            "id": f"news-{i}",
+            "values": vector,
+            "metadata": {
+                "text": full_text,
+                "url": entry.link,
+                "sentiment": sentiment_label,
+                "sentiment_score": sentiment_score
+            }
+        }])
+
 print(f"[計時] 向量 encode + Pinecone 上傳耗時: {time.perf_counter() - start_time:.2f} 秒") 
     # print(f" 已上傳到 Pinecone: {text}")
 
@@ -116,9 +146,25 @@ result = index.query(vector=query_vector, top_k=3, include_metadata=True)
 matches = result.get("matches", [])
 print(f"[計時] Pinecone 檢索耗時: {time.perf_counter() - start_time:.2f} 秒")  
 
+# === 新增這段：統計情緒傾向 ===
+positive_count = sum(1 for m in matches if m['metadata'].get('sentiment') == 'POSITIVE')
+negative_count = sum(1 for m in matches if m['metadata'].get('sentiment') == 'NEGATIVE')
+
+if positive_count > negative_count:
+    avg_sentiment_summary = "正向"
+elif negative_count > positive_count:
+    avg_sentiment_summary = "負向"
+else:
+    avg_sentiment_summary = "中性"
+
+
+
 prompt_content = "以下是與問題最相關的新聞，請分析它們對鴻海股價的影響：\n\n"
 for match in matches:
-    prompt_content += match["metadata"]["text"] + "\n"
+    sentiment = match["metadata"].get("sentiment", "未知")
+    score = match["metadata"].get("sentiment_score", 0.0)
+    prompt_content += f"【情緒：{sentiment}，信心：{score:.2f}】\n"
+    prompt_content += match["metadata"]["text"] + "\n\n"
 
 # ------------------------
 # Yahoo Finance & 技術指標 (用 ta)
@@ -152,12 +198,8 @@ macd = df["MACD"].iloc[-1]
 macd_signal = df["MACD_signal"].iloc[-1]
 macd_signal_text = "黃金交叉(偏多)" if macd > macd_signal else "死亡交叉(偏空)"
 
-# ------------------------
-# Hugging Face 情緒分析
-sentiment_pipeline = pipeline(
-    "sentiment-analysis",
-    model="distilbert/distilbert-base-uncased-finetuned-sst-2-english"
-)
+
+
 sentiments = []
 for news in news_list:
     result = sentiment_pipeline(news)[0]
@@ -202,6 +244,7 @@ prompt_content += """
 - 若CPI持續上漲，顯示通膨壓力增加，通常對股市偏空。
 - 若企業持續投入AI與自動化，代表未來成長潛力，偏利多。
 - 技術面若RSI過低、MACD黃金交叉，短期可能反彈；若RSI過高或MACD死亡交叉，短期可能回檔。
+- 最新新聞情緒平均偏向: {avg_sentiment_summary}
 
 此外，**請務必預測明日的股價方向與預估幅度**（例如：「預估明日小幅上漲約1%」或「預期下跌1~2%」），
 最後以1-2句話給出簡短的投資建議（如「可逢低分批佈局」或「建議短期觀望」），
