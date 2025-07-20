@@ -25,6 +25,8 @@ import string
 from nltk.tokenize import TreebankWordTokenizer
 import ta  
 
+from flask import Flask, jsonify
+from flask_cors import CORS
 
 
 
@@ -263,18 +265,29 @@ response = client.chat.completions.create(
 print("\n=== GPT 回傳分析 ===")
 print(response.choices[0].message.content)
 
-# 顯示現價、近10日收盤價與走勢圖
-# print(f"\n=== {stock_name}({stock_symbol}) 最新收盤價 ===")
-# print(f"現價: {current_price:.2f}")
 
-# print(f"\n=== {stock_name} 近10日收盤價 ===")
-# print(df[["Close"]].tail(10))
 
-# plt.figure(figsize=(10,5))
-# plt.plot(df.index, df["Close"])
-# plt.title(f"{stock_name}({stock_symbol}) 近6個月股價走勢")
-# plt.xlabel("日期")
-# plt.ylabel("收盤價")
-# plt.xticks(rotation=45)
-# plt.tight_layout()
-# plt.show()
+# === Flask API ===
+app = Flask(__name__)
+CORS(app)
+
+@app.route("/api/stock")
+def stock_data():
+    return jsonify({
+        "chart": {
+            "dates": df.index.strftime("%m/%d").tolist()[-10:],
+            "prices": df["Close"].round(2).tolist()[-10:]
+        },
+        "gpt": response.choices[0].message.content,
+        "news": [
+            {
+                "title": match["metadata"]["text"][:30] + "...",
+                "sentiment": match["metadata"]["sentiment"],
+                "score": round(match["metadata"]["sentiment_score"], 2)
+            }
+            for match in matches
+        ]
+    })
+
+if __name__ == "__main__":
+    app.run(port=5000)
