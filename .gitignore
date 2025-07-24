@@ -1,2 +1,5 @@
 .venv/
 .env
+
+# 忽略所有 .exe 檔
+*.exe
