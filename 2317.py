@@ -34,20 +34,43 @@ import time
 
 
 
-
-    # ------------------------
     #  extract_news_content
 def extract_news_content(url):
     try:
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
+
+        # 取出文章內容
         paragraphs = [p.get_text() for p in soup.find_all('p')]
-        content = ' '.join(paragraphs)
-        return content.strip()
+        content = ' '.join(paragraphs).strip()
+
+        # 嘗試抓發佈時間
+        # 常見格式 meta / time 標籤
+        published_str = None
+        time_tag = soup.find('time')
+        if time_tag and time_tag.has_attr('datetime'):
+            published_str = time_tag['datetime']
+        elif soup.find('meta', attrs={"property": "article:published_time"}):
+            published_str = soup.find('meta', attrs={"property": "article:published_time"})['content']
+        elif soup.find('meta', attrs={"name": "pubdate"}):
+            published_str = soup.find('meta', attrs={"name": "pubdate"})['content']
+
+        # 判斷是否是近30天的新聞
+        if published_str:
+            try:
+                published_dt = datetime.fromisoformat(published_str.replace("Z", "+00:00")).astimezone()
+                if published_dt < datetime.now() - timedelta(days=30):
+                    print(f"❌ 過期新聞：{published_dt.date()} - {url}")
+                    return ""  # 超過30天就不要收
+            except Exception as e:
+                print(f"⚠️ 無法解析日期格式：{published_str}，錯誤：{e}")
+
+        return content
     except Exception as e:
         print(f"Error fetching {url}: {e}")
         return ""
+
 
 @app.route("/api/stock")
 def stock_data():
@@ -81,17 +104,19 @@ def stock_data():
     rss_url = "https://news.google.com/rss/search?q=鴻海"
     feed = feedparser.parse(rss_url)
 
-    # 篩選近30日的新聞
-    cutoff_date = datetime.now() - timedelta(days=30)
-    filtered_entries = []
+    # 先抓最多20篇，再交給 extract_news_content() 自行判斷有效日期
+    filtered_entries = feed.entries[:20]
     news_list = []
 
-    for entry in feed.entries:
-        if hasattr(entry, "published_parsed"):
-            published = datetime.fromtimestamp(time.mktime(entry.published_parsed))
-            if published >= cutoff_date:
-                filtered_entries.append(entry)
-                news_list.append("[Google] " + entry.title + " - " + entry.link)
+    for entry in entries:
+        content = extract_news_content(entry.link)
+        if not content:
+            continue  # 若內文為空或非近30日（由 extract_news_content 決定），就跳過
+
+        # 留下來的 entry 要加入 list
+        entry.news_content = content  # 把內容暫存在 entry 裡
+        filtered_entries.append(entry)
+        news_list.append("[Google] " + entry.title + " - " + entry.link)
 
 # 最多只取10則
 filtered_entries = filtered_entries[:10]
