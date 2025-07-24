@@ -29,6 +29,8 @@ import string
 from nltk.tokenize import TreebankWordTokenizer
 import ta  
 
+from datetime import datetime, timedelta
+import time
 
 
 
@@ -75,12 +77,24 @@ def stock_data():
     # ------------------------
     # Google News RSS (搜尋鴻海)
     start_time = time.perf_counter() 
+    # Google News RSS (搜尋鴻海)
     rss_url = "https://news.google.com/rss/search?q=鴻海"
     feed = feedparser.parse(rss_url)
 
+    # 篩選近30日的新聞
+    cutoff_date = datetime.now() - timedelta(days=30)
+    filtered_entries = []
     news_list = []
-    for entry in feed.entries[:10]:
-        news_list.append("[Google] " + entry.title + " - " + entry.link)
+
+    for entry in feed.entries:
+        if hasattr(entry, "published_parsed"):
+            published = datetime.fromtimestamp(time.mktime(entry.published_parsed))
+            if published >= cutoff_date:
+                filtered_entries.append(entry)
+                news_list.append("[Google] " + entry.title + " - " + entry.link)
+
+# 最多只取10則
+filtered_entries = filtered_entries[:10]
 
     # ------------------------
     # BM25 前置處理
@@ -219,6 +233,7 @@ def stock_data():
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     prompt_content = f"""
     你是專業股市分析師，從以下五面向：財報穩健度、產業週期、估值水位、技術指標、新聞情緒，
+    **你的新聞必須是近30日的**，
     結合葛拉漢安全邊際理論、巴菲特護城河、彼得林區選股方法，以及總體經濟利率折現理論，
     針對 {stock_name} 的詳細投資數據與技術指標進行分析，並嚴格依據數據做專業推論。
      **邏輯推論** 與 **具體預測**
@@ -256,6 +271,19 @@ def stock_data():
     - 若企業持續投入AI與自動化，代表未來成長潛力，偏利多。
     - 技術面若RSI過低、MACD黃金交叉，短期可能反彈；若RSI過高或MACD死亡交叉，短期可能回檔。
     - 最新新聞情緒平均偏向: {avg_sentiment_summary}
+
+    你需要明確的指出
+    1.明確新聞來源
+    在提示中標明新聞平台／標題／時間，讓模型知道依據的是哪些資訊。
+
+    2.聚焦重點元素
+    引導模型先「摘要新聞要點」（事件、數據、消息），再在此基礎上推測心理。
+
+    3.框架化分析維度
+    可以從「情緒（Fear/Greed）」「預期（預期上漲/下跌）」「動機（逢低布局/獲利了結）」等面向拆解。
+
+    4.產出格式引導
+    明確要求「用條列」或「分段」回覆，有助於結構化結果。
 
     此外，**請務必預測明日的股價方向與預估幅度**（例如：「預估明日小幅上漲約1%」或「預期下跌1~2%」），
     最後以1-2句話給出簡短的投資建議（如「可逢低分批佈局」或「建議短期觀望」），
