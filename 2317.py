@@ -90,7 +90,8 @@ def search_google_news(query: str, num_results: int = 20):
             "num": per_page,
             "start": i * per_page + 1,
             "hl": "zh-TW",
-            "gl": "tw"
+            "gl": "tw",
+            "dateRestrict": "d2" 
         }
         params_list.append(params)
 
