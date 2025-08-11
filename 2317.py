@@ -21,6 +21,8 @@ from newsapi import NewsApiClient
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
 from urllib.parse import urlencode
+from typing import Optional, Tuple
+
 
 
 # 初始化 Flask 應用與環境變數
@@ -29,22 +31,25 @@ CORS(app)
 os.environ.pop("OPENAI_API_KEY", None)
 load_dotenv(dotenv_path="C:/Users/user/Desktop/RAGenius3/.env")
 
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
-def extract_news_content(url: str) -> str:
-    """
-    透過 requests + BeautifulSoup 抓取網頁內所有 <p> 段落文字，
-    並根據 meta time 標籤或 <time> 判斷是否近30天，超過返回空字符串。
-    """
+MODEL_NAME = "uer/roberta-base-finetuned-jd-binary-chinese"
+sentiment_pipe = pipeline(
+    "sentiment-analysis",
+    model=MODEL_NAME,
+    tokenizer=MODEL_NAME
+)
+
+
+def extract_news_content(url: str) -> Tuple[str, Optional[datetime]]:
     try:
         resp = requests.get(url, timeout=5)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
 
-        # 收集段落文字
         paragraphs = [p.get_text() for p in soup.find_all('p')]
         content = ' '.join(paragraphs).strip()
 
-        # 抓發布時間
         published_str = None
         time_tag = soup.find('time')
         if time_tag and time_tag.has_attr('datetime'):
@@ -65,7 +70,8 @@ def extract_news_content(url: str) -> str:
         return content, None
     except Exception as e:
         print(f"❌ 無法抓取新聞 {url}: {e}")
-        return ""
+        return "", None
+
 
 
 def search_google_news(query: str, num_results: int = 20):
@@ -92,15 +98,16 @@ def search_google_news(query: str, num_results: int = 20):
             "hl": "zh-TW",
             "gl": "tw",
             "dateRestrict": "d2" 
+
         }
         params_list.append(params)
 
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0"
-        }
-        
-        all_items = []
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
+    
+    all_items = []
 
     for i, params in enumerate(params_list):
         encoded = urlencode(params, safe="")
@@ -146,7 +153,7 @@ def search_google_news(query: str, num_results: int = 20):
 def get_stock_metrics(stock_symbol: str, newsapi_key: str) -> dict:
     """
     動態從 Yahoo Finance 抓取 EPS、PE、DCF、ROE、RSI、MACD、利率等，
-    並從 NewsAPI 抓取近 30 天新聞做情緒分析。
+    並從 NewsAPI 抓取近 10 天新聞做情緒分析。
     """
     ticker = yf.Ticker(stock_symbol)
     info   = ticker.info
@@ -241,9 +248,8 @@ def get_stock_metrics(stock_symbol: str, newsapi_key: str) -> dict:
         page_size=15
     ).get("articles", [])
     headlines = [a.get("title","") for a in articles]
-    sa_pipe = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
-    sentiments = sa_pipe(headlines)
-    scores = [1 if s["label"]=="POSITIVE" else -1 for s in sentiments]
+    sentiments = sentiment_pipe(headlines)
+    scores = [1 if s["label"] in ["1", "POSITIVE", "正向"] else -1 for s in sentiments]
     avg_score = sum(scores)/len(scores) if scores else 0
     avg_sent = "正向" if avg_score>0 else "負向" if avg_score<0 else "中性"
 
@@ -278,12 +284,7 @@ def stock_data():
     pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
     index = pc.Index("news-index")
     model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
-    sentiment_pipe = pipeline(
-        "sentiment-analysis",
-        model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-        revision="714eb0f"
 
-    )
 
     # 1) 搜新聞
     print("✅ GOOGLE_API_KEY:", os.getenv("GOOGLE_API_KEY"))
@@ -397,10 +398,15 @@ def stock_data():
         📰【新聞情緒】
         - 本日新聞情緒平均：{avg_sent}
         - 重點新聞摘要如下：
-        1. {headlines[0]}
-        2. {headlines[1]}
-        3. …
         """
+
+    if len(headlines) >= 2:
+        prompt_content += f"1. {headlines[0]}\n2. {headlines[1]}\n"
+    elif len(headlines) == 1:
+        prompt_content += f"1. {headlines[0]}\n2. 無第二則新聞可用\n"
+    else:
+        prompt_content += "1. 無新聞可用\n2. 無新聞可用\n"
+        
     for m in matches:
         prompt_content += m['metadata']['text'] + "\n"
 
@@ -426,9 +432,10 @@ def stock_data():
         3. 框架化分析維度（情緒、預期、動機）。
         4. 產出格式引導（條列或分段）。
         5. **所有新聞皆來自最近10日，並以近3日為主。**
+        
 
-
-        此外，**請務必預測明日的股價方向與預估幅度**，並以1–2句話給出投資建議。
+        **即使估值偏高，但若新聞情緒明顯偏正向，也應一併考慮市場短期樂觀心理可能帶來的上漲動能。**
+        此外，**請務必預測明日的股價方向與預估幅度，用上漲、下跌或平盤來說明，並說明漲多少或下跌多少**，並以1–2句話給出投資建議。
 
         請用繁體中文回答。
         """
