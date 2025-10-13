@@ -23,7 +23,7 @@ from ta.trend import MACD
 from urllib.parse import urlencode
 from typing import Optional, Tuple
 
-
+RECENT_DAYS = 3
 
 # 初始化 Flask 應用與環境變數
 app = Flask(__name__)
@@ -62,7 +62,7 @@ def extract_news_content(url: str) -> Tuple[str, Optional[datetime]]:
         if published_str:
             try:
                 dt = datetime.fromisoformat(published_str.replace('Z', '+00:00')).astimezone()
-                if dt < datetime.now() - timedelta(days=10):
+                if dt < datetime.now() - timedelta(days=RECENT_DAYS):
                     return "", None
                 return content, dt
             except:
@@ -97,7 +97,7 @@ def search_google_news(query: str, num_results: int = 20):
             "start": i * per_page + 1,
             "hl": "zh-TW",
             "gl": "tw",
-            "dateRestrict": "d2" 
+            "dateRestrict": "d3" 
 
         }
         params_list.append(params)
@@ -149,6 +149,88 @@ def search_google_news(query: str, num_results: int = 20):
         }
         for item in all_items
     ]
+
+# 1) 新增：通用的新聞搜尋（個股/大盤都可用）
+def gather_news(query_list, num_results=10):
+    all_news = []
+    for q in query_list:
+        # Google CSE
+        g_items = search_google_news(q, num_results=min(10, num_results))
+        for it in g_items:
+            content, pub_dt = extract_news_content(it["link"])
+            if content:
+                s = sentiment_pipe(it["title"])[0]
+                all_news.append({
+                    "source": "GoogleCSE",
+                    "query": q,
+                    "title": it["title"],
+                    "link": it["link"],
+                    "published": pub_dt,
+                    "sentiment": s["label"],
+                    "score": round(s["score"], 3),
+                    "content": content
+                })
+    # NewsAPI（大盤用關鍵字、語言：中文）
+    newsapi_key = os.getenv("NEWSAPI_KEY")
+    if newsapi_key:
+        newsapi = NewsApiClient(api_key=newsapi_key)
+        to_date = datetime.utcnow().date()
+        from_date = to_date - timedelta(days=RECENT_DAYS)
+        for q in query_list:
+            arts = newsapi.get_everything(
+                q=q,
+                from_param=from_date.isoformat(),
+                to=to_date.isoformat(),
+                language="zh",
+                sort_by="publishedAt",
+                page_size=10
+            ).get("articles", [])
+            for a in arts:
+                title = a.get("title","")
+                url = a.get("url","")
+                content, pub_dt = extract_news_content(url)
+                if content:
+                    s = sentiment_pipe(title)[0]
+                    all_news.append({
+                        "source": "NewsAPI",
+                        "query": q,
+                        "title": title,
+                        "link": url,
+                        "published": pub_dt,
+                        "sentiment": s["label"],
+                        "score": round(s["score"], 3),
+                        "content": content
+                    })
+
+    # 近10天 & 依日期新到舊
+    all_news = [n for n in all_news if n.get("published") is None or n["published"] >= datetime.now()-timedelta(days=RECENT_DAYS)]
+    all_news.sort(key=lambda x: x["published"] or datetime.min, reverse=True)
+    return all_news[:num_results]
+
+# 2) 新增：通用指數技術面
+def get_index_metrics(symbol: str):
+    t = yf.Ticker(symbol)
+    hist = t.history(period="6mo")["Close"].dropna()
+    if len(hist) < 30:
+        return {}
+    rsi = float(RSIIndicator(hist, window=14).rsi().iloc[-1])
+    macd_ind = MACD(hist)
+    macd = float(macd_ind.macd().iloc[-1])
+    macd_sig = float(macd_ind.macd_signal().iloc[-1])
+    trend = "偏多" if macd > macd_sig else "偏空"
+    return {
+        "symbol": symbol,
+        "last": float(hist.iloc[-1]),
+        "rsi": rsi,
+        "rsi_note": "超買" if rsi>70 else "超賣" if rsi<30 else "中性",
+        "macd": macd, "macd_signal": macd_sig, "macd_note": "買入" if macd>macd_sig else "賣出",
+        "trend": trend,
+        "chart": {
+            "dates": hist.index.strftime("%Y-%m-%d").tolist()[-30:],
+            "prices": [round(x,2) for x in hist.tolist()[-30:]]
+        }
+    }
+
 
 def get_stock_metrics(stock_symbol: str, newsapi_key: str) -> dict:
     """
@@ -238,7 +320,7 @@ def get_stock_metrics(stock_symbol: str, newsapi_key: str) -> dict:
     # 新聞情緒（NewsAPI）
     newsapi = NewsApiClient(api_key=newsapi_key)
     to_date = datetime.utcnow().date()
-    from_date = to_date - timedelta(days=30)
+    from_date = to_date - timedelta(days=RECENT_DAYS)
     articles = newsapi.get_everything(
         q=stock_symbol,
         from_param=from_date.isoformat(),
@@ -280,165 +362,142 @@ def get_stock_metrics(stock_symbol: str, newsapi_key: str) -> dict:
 def stock_data():
     tokenizer = TreebankWordTokenizer()
 
-    # Pinecone 與 Embedding & Sentiment Pipeline
     pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
     index = pc.Index("news-index")
     model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
 
-
-    # 1) 搜新聞
-    print("✅ GOOGLE_API_KEY:", os.getenv("GOOGLE_API_KEY"))
-    print("✅ GOOGLE_CSE_ID:", os.getenv("GOOGLE_CSE_ID"))
-    results = search_google_news("鴻海", num_results=10)
-    filtered = []
-    for it in results:
-        title = it.get('title', '')
-        link = it.get('link', '')
-        print(f"🔗 嘗試抓新聞：{title} | {link}")
-
-        content, pub_dt = extract_news_content(link)
-        if content:
-            sentiment = sentiment_pipe(title)[0]
-            filtered.append({
-                'title': title,
-                'link': link,
-                'content': content,
-                'sentiment': sentiment['label'],
-                'score': round(sentiment['score'], 3),
-                'published': pub_dt
-            })
-
-    filtered.sort(key=lambda x: x['published'] or datetime.min, reverse=True)
-    filtered = filtered[:10]
-
-    # 2) BM25 前處理
+    # === 個股：鴻海 ===
+    foxconn_news = gather_news(["鴻海", "富士康 2317", "鴻海 AI"])
+    print("✅ 鴻海新聞筆數：", len(foxconn_news))
+    # === 大盤（台股/美股） ===
+    market_news = gather_news(["台股 大盤", "加權指數", "台灣股市", "美股", "NASDAQ", "S&P 500"], num_results=15)
+    print("✅ 市場新聞筆數：", len(market_news))
+    # === 上傳 BM25 + 向量（針對個股新聞）===
+    filtered = foxconn_news[:10]
     corpus = []
     for e in filtered:
         txt = e['title'] + ' ' + e['content'][:1000]
         toks = [t for t in tokenizer.tokenize(txt.lower()) if t not in string.punctuation]
         corpus.append(toks)
 
-    # 3) 空 corpus guard
-    if not corpus or all(len(doc)==0 for doc in corpus):
-        matches = []
-        avg_sent = "中性"
-    else:
-        # 4) BM25
+    matches = []
+    avg_sent = "中性"
+    if corpus and not all(len(d)==0 for d in corpus):
         bm25 = BM25Okapi(corpus)
-        # 5) 上傳向量
         for i,e in enumerate(filtered):
             text = e['title'] + ' ' + e['content'][:1000]
             vec  = model.encode(text).tolist()
-            short_text = text[:500]  # 或保守點用 300
-            s = sentiment_pipe(short_text)[0]
-            
-            index.upsert([{
-                'id': f'news-{i}',
-                'values': vec,
-                'metadata': {
+            s = sentiment_pipe(text[:500])[0]
+            metadata = {
                 'text': text,
                 'url': e['link'],
                 'sentiment': s['label'],
-                'sentiment_score': round(s['score'],3)
-                }
+                'sentiment_score': round(s['score'], 3),
+            }
+            if e.get('published'):
+                metadata['published'] = e['published'].isoformat()
+
+            index.upsert([{
+                'id': f'news-{i}',
+                'values': vec,
+                'metadata': metadata,
             }])
-        # 6) BM25 取 top5，並做向量檢索 top3
-        query   = "鴻海AI發展對市場影響"
-        qtokens = [t for t in tokenizer.tokenize(query.lower())
-                    if t not in string.punctuation]
-        bm_scores = bm25.get_scores(qtokens)
-        top_idx   = sorted(range(len(bm_scores)),
-                        key=lambda i: bm_scores[i],
-                        reverse=True)[:5]
 
-        qvec    = model.encode(query).tolist()
-        res     = index.query(vector=qvec, top_k=3, include_metadata=True)
+        query = "鴻海 AI 產能與接單對台股影響"
+        qvec = model.encode(query).tolist()
+        res = index.query(vector=qvec, top_k=3, include_metadata=True)
         matches = res.get('matches', [])
+        pos = sum(1 for m in matches if m['metadata']['sentiment']=='POSITIVE')
+        neg = sum(1 for m in matches if m['metadata']['sentiment']=='NEGATIVE')
+        avg_sent = '正向' if pos>neg else '負向' if neg>pos else '中性'
 
-        # 7) 平均情緒
-        pos = sum(1 for m in matches
-                if m['metadata']['sentiment'] == 'POSITIVE')
-        neg = sum(1 for m in matches
-                if m['metadata']['sentiment'] == 'NEGATIVE')
-        avg_sent = '正向' if pos > neg else '負向' if neg > pos else '中性'
+    # === 個股財務與技術 ===
+    stock_name = "鴻海"
+    metrics = get_stock_metrics("2317.TW", os.getenv("NEWSAPI_KEY"))
 
-    # 財務與技術指標
-    stock_symbol = "2317.TW"
-    stock_name   = "鴻海"
-    metrics = get_stock_metrics(stock_symbol, os.getenv("NEWSAPI_KEY"))
+    # === 大盤指數（台股 + 美股概況）===
+    idx_twii = get_index_metrics("^TWII")
+    idx_spx  = get_index_metrics("^GSPC")
+    idx_ixic = get_index_metrics("^IXIC")
 
-    eps               = metrics['eps']; pe_ratio          = metrics['pe_ratio']; industry_pe       = metrics['industry_pe']
-    fcf               = metrics['fcf']; growth_rate       = metrics['growth_rate']; discount_rate     = metrics['discount_rate']
-    intrinsic_value   = metrics['intrinsic_value']; current_price     = metrics['current_price']
-    margin            = metrics['margin']; roe               = metrics['roe']; moat              = metrics['moat']
-    rsi               = metrics['rsi']; rsi_signal        = metrics['rsi_signal']
-    macd              = metrics['macd']; macd_signal       = metrics['macd_signal']; macd_signal_text  = metrics['macd_signal_text']
-    interest_rate     = metrics['interest_rate']; rate_position     = metrics['rate_position']
-    avg_sent_fin      = metrics['avg_sent']; headlines         = metrics['headlines']
+    # === GPT：把「大盤 + 個股」一起分析 ===
+    market_headlines = [n["title"] for n in market_news[:5]]
+    fox_headlines = metrics["headlines"][:2] if metrics.get("headlines") else []
 
-    # 組 prompt 並呼叫 GPT
     prompt_content = f"""
-        你是專業股市分析師，從以下五面向：財報穩健度、產業週期、估值水位、技術指標、新聞情緒，
-        **你的新聞必須是近10日的**，
-        結合葛拉漢安全邊際理論、巴菲特護城河、彼得林區選股方法，以及總體經濟利率折現理論，
-        針對 {stock_name} 的詳細投資數據與技術指標進行分析，並嚴格依據數據做專業推論。
-        **邏輯推論** 與 **具體預測**
+    你是專業股市分析師，從以下五面向：財報穩健度、產業週期、估值水位、技術指標、新聞情緒，
+    **你的新聞必須是近10日的**，
+    結合葛拉漢安全邊際理論、巴菲特護城河、彼得林區選股方法，以及總體經濟利率折現理論，
+    針對 {stock_name} 的詳細投資數據與技術指標進行分析，並嚴格依據數據做專業推論。
+    **邏輯推論** 與 **具體預測**
+
+    同時請從「大盤」與「個股」兩層做判讀，時間以近10日為主、近3日權重最高。
+
+    [大盤]
+    - 台股(^TWII) 收盤：約 {idx_twii.get('last')}, RSI {idx_twii.get('rsi'):.1f}（{idx_twii.get('rsi_note')}）, MACD:{idx_twii.get('macd'):.2f}/{idx_twii.get('macd_signal'):.2f}（{idx_twii.get('macd_note')}）, 趨勢：{idx_twii.get('trend')}
+    - S&P500(^GSPC) RSI {idx_spx.get('rsi'):.1f}（{idx_spx.get('rsi_note')}）；NASDAQ(^IXIC) RSI {idx_ixic.get('rsi'):.1f}（{idx_ixic.get('rsi_note')}）
+    - 大盤重點新聞（前5）：
+    - """ + "\n  - ".join(market_headlines if market_headlines else ["無"]) + f"""
+
+    [個股：{stock_name} 2317.TW]
+    - EPS:{metrics['eps']}、PE:{metrics['pe_ratio']}、同業PE均值:{metrics['industry_pe']}
+    - DCF估值:{metrics['intrinsic_value']:.2f}，現價:{metrics['current_price']:.2f}，折溢價：{metrics['margin']:.1f}%
+    - ROE:{metrics['roe']:.1f}%（護城河：{metrics['moat']}）
+    - RSI:{metrics['rsi']:.1f}（{metrics['rsi_signal']}），MACD:{metrics['macd']:.2f}/{metrics['macd_signal']:.2f}（{metrics['macd_signal_text']}）
+    - 近30日個股新聞情緒：{metrics['avg_sent']}；重點標題：""" + "；".join(fox_headlines if fox_headlines else ["無"]) + f"""
+
+    [近似新聞片段（RAG）重點]
+    """ + "\n".join([m['metadata']['text'][:400] for m in matches]) + """
+
+    你需要將上述數據與新聞完整融合，從「財報穩健度、產業週期、估值水位、技術指標、新聞情緒」進行論證。
+
+    你需要明確指出：
+    1. 明確新聞來源（平台／標題／時間）。
+    2. 聚焦重點元素（摘要新聞要點，再推測市場/法人心理）。
+    3. 框架化分析維度（情緒、預期、動機）。
+    4. 產出格式引導（條列或分段）。
+    5. **所有新聞以近3日為主，越新權重越高，越舊參考性越低。**
+
+    **即使估值偏高，但若新聞情緒明顯偏正向，也應考慮短期樂觀心理可能帶來的上漲動能。**
+    此外，**請務必預測明日的股價方向與預估幅度**（上漲/下跌/平盤 + 百分比），並以 1–2 句話給出投資建議。
+
+    請用繁體中文回答。
+    """
 
 
-
-        📰【新聞情緒】
-        - 本日新聞情緒平均：{avg_sent}
-        - 重點新聞摘要如下：
-        """
-
-    if len(headlines) >= 2:
-        prompt_content += f"1. {headlines[0]}\n2. {headlines[1]}\n"
-    elif len(headlines) == 1:
-        prompt_content += f"1. {headlines[0]}\n2. 無第二則新聞可用\n"
-    else:
-        prompt_content += "1. 無新聞可用\n2. 無新聞可用\n"
-        
-    for m in matches:
-        prompt_content += m['metadata']['text'] + "\n"
-
-    prompt_content += """
-        你需要將上述數據與新聞完整融合，從「財報穩健度、產業週期、估值水位、技術指標、新聞情緒」
-
-        
-
-        你需要明確指出：
-        1. 明確新聞來源（平台／標題／時間）。
-        2. 聚焦重點元素（摘要新聞要點，再推測心理）。
-        3. 框架化分析維度（情緒、預期、動機）。
-        4. 產出格式引導（條列或分段）。
-        5. **所有新聞以近3日為主，以越新的新聞為主，越舊的新聞參考性越低。**
-        
-
-        **即使估值偏高，但若新聞情緒明顯偏正向，也應一併考慮市場短期樂觀心理可能帶來的上漲動能。**
-        此外，**請務必預測明日的股價方向與預估幅度，用上漲、下跌或平盤來說明，並說明漲多少或下跌多少**，並以1–2句話給出投資建議。
-
-        請用繁體中文回答。
-        """
-
-    # GPT 呼叫
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role":"user","content": prompt_content}],
     )
 
+    # === 統一回傳的 chart 結構（個股）===
     ticker = yf.Ticker("2317.TW")
-
-    chart_df = ticker.history(period="10d")[["Close"]].reset_index()
-    chart_df["Date"] = chart_df["Date"].dt.strftime("%Y-%m-%d")  # 時間格式轉為字串
-    chart_data = chart_df.to_dict(orient="records")
+    stock_hist = ticker.history(period="10d")["Close"].reset_index()
+    stock_chart = {
+        "dates": stock_hist["Date"].dt.strftime("%Y-%m-%d").tolist(),
+        "prices": [round(x,2) for x in stock_hist["Close"].tolist()]
+    }
 
     return jsonify({
-        'news': [{'title': e['title'], 'link': e['link'], 'sentiment': e['sentiment'], 'score': e['score']} for e in filtered],
-        'sentiment_summary': avg_sent,
-        'gpt': response.choices[0].message.content,
-        'chart_data': chart_data 
+        "gpt": response.choices[0].message.content,
+        "sentiment_summary": avg_sent,
+        "stock_chart": stock_chart,
+        "index_twii": idx_twii,
+        "index_spx": idx_spx,
+        "index_ixic": idx_ixic,
+        "news": {
+            "foxconn": [
+                {"title": n["title"], "link": n["link"], "sentiment": n["sentiment"], "score": n["score"], "published": n["published"].isoformat() if n.get("published") else None}
+                for n in foxconn_news[:10]
+            ],
+            "market": [
+                {"title": n["title"], "link": n["link"], "sentiment": n["sentiment"], "score": n["score"], "query": n["query"], "published": n["published"].isoformat() if n.get("published") else None}
+                for n in market_news[:15]
+            ]
+        }
     })
+
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
