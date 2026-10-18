@@ -1,5 +1,7 @@
 .venv/
-.env
-
-# 忽略所有 .exe 檔
 *.exe
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
