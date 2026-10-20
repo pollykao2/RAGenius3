@@ -4,6 +4,16 @@
 
 RAGenius 結合財經新聞情緒分析、檢索增強生成（RAG）、基本面與技術指標，協助使用者整理台股資訊並分析短期股價趨勢。
 
+## Project Structure
+
+本系統採前後端分離，程式碼分別存放於兩個 Repository：
+
+- **模型與後端：[RAGenius3](https://github.com/pollykao2/RAGenius3)**
+  負責資料蒐集、新聞情緒分析、向量儲存與檢索，以及 GPT-4o 整合分析。
+
+- **前端：[ragenius_react](https://github.com/pollykao2/ragenius_react)**
+  使用 Next.js、React 與 TypeScript 建置前端專案。
+
 ## System Architecture
 
 1. **資料蒐集**：取得個股新聞、市場新聞、財務數據與市場指標。
@@ -13,10 +23,9 @@ RAGenius 結合財經新聞情緒分析、檢索增強生成（RAG）、基本�
 
 ## Evaluation
 
-以鴻海（2317.TW）進行每日預測追蹤，記錄 RAGenius 的預測
-漲跌區間、ARIMA 預測值與實際漲跌幅，作為模型比較的依據。
-評估涵蓋方向判斷、區間涵蓋與極端波動案例。
+以鴻海（2317.TW）進行每日預測追蹤，記錄 RAGenius 的預測漲跌區間、ARIMA 預測值與實際漲跌幅，作為模型比較的依據。
 
+評估涵蓋方向判斷、區間涵蓋與極端波動案例。
 
 ## Current Limitations
 
