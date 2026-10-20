@@ -1,0 +1,58 @@
+name: Backend CI/CD Pipeline
+
+# 觸發條件：當 main 分支有新的 push 時自動執行
+on:
+  push:
+    branches: [ "main" ]
+  # 允許在 GitHub 頁面上手動點擊觸發
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build & Test Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 下載專案程式碼
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. 安裝 Python 環境
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 3. 快取依賴套件（加速每次 Action 的執行速度）
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # 4. 安裝依賴套件
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # 5. 語法或單元測試（可選）
+      - name: Run basic check
+        run: |
+          echo "後端依賴安裝完成，準備進入部署流程..."
+
+  deploy:
+    name: Deploy to Server
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 部署指令區塊：此處依你的目標環境執行
+      - name: Execute Deployment
+        run: |
+          echo "執行部署..."
